@@ -39,19 +39,84 @@ def plot_contour(contour: np.ndarray, title: str = "Contour") -> go.Figure:
     return fig
 
 
-def plot_global_map(embedding_df) -> go.Figure:
-    """Placeholder: plot a 2D scatter for embeddings (expects DataFrame with x,y,label)."""
+def plot_global_map(embedding_df, show_clusters: bool = False) -> go.Figure:
+    """Plot a 2D scatter for embeddings with optional cluster coloring.
+    
+    Parameters:
+        embedding_df: DataFrame with x, y, label columns (and optionally 'cluster')
+        show_clusters: クラスタごとに色分けするかどうか
+    """
     fig = go.Figure()
-    fig.add_trace(
-        go.Scatter(
-            x=embedding_df["x"],
-            y=embedding_df["y"],
-            mode="markers",
-            text=embedding_df.get("label", None),
-            hovertemplate="%{text}<extra></extra>",
+    
+    if show_clusters and "cluster" in embedding_df.columns:
+        # クラスタごとに異なる色でプロット
+        clusters = embedding_df["cluster"].unique()
+        clusters = sorted([c for c in clusters if c >= 0])  # -1はノイズ（DBSCANの場合）
+        
+        # カラーパレット
+        colors = [
+            "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+            "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
+            "#aec7e8", "#ffbb78", "#98df8a", "#ff9896", "#c5b0d5"
+        ]
+        
+        for i, cluster in enumerate(clusters):
+            cluster_df = embedding_df[embedding_df["cluster"] == cluster]
+            color = colors[i % len(colors)]
+            
+            fig.add_trace(
+                go.Scatter(
+                    x=cluster_df["x"],
+                    y=cluster_df["y"],
+                    mode="markers",
+                    marker=dict(size=12, color=color, line=dict(width=1, color="white")),
+                    text=cluster_df["label"],
+                    name=f"Cluster {cluster}",
+                    hovertemplate="<b>%{text}</b><br>Cluster: " + str(cluster) + "<extra></extra>",
+                )
+            )
+        
+        # ノイズ点（DBSCANでcluster=-1の場合）
+        noise_df = embedding_df[embedding_df["cluster"] == -1]
+        if len(noise_df) > 0:
+            fig.add_trace(
+                go.Scatter(
+                    x=noise_df["x"],
+                    y=noise_df["y"],
+                    mode="markers",
+                    marker=dict(size=8, color="gray", symbol="x"),
+                    text=noise_df["label"],
+                    name="Noise",
+                    hovertemplate="<b>%{text}</b><br>Noise<extra></extra>",
+                )
+            )
+        
+        fig.update_layout(
+            title="Global Map (Clustered)",
+            xaxis_title="Dim 1",
+            yaxis_title="Dim 2",
+            legend_title="Clusters",
+            showlegend=True
         )
+    else:
+        # クラスタなしの通常表示
+        fig.add_trace(
+            go.Scatter(
+                x=embedding_df["x"],
+                y=embedding_df["y"],
+                mode="markers",
+                marker=dict(size=10, color="#2a9d8f"),
+                text=embedding_df.get("label", None),
+                hovertemplate="<b>%{text}</b><extra></extra>",
+            )
+        )
+        fig.update_layout(title="Global Map", xaxis_title="Dim 1", yaxis_title="Dim 2")
+    
+    fig.update_layout(
+        template="plotly_white",
+        xaxis=dict(scaleanchor="y", scaleratio=1),
     )
-    fig.update_layout(title="Global Map", xaxis_title="Dim 1", yaxis_title="Dim 2")
+    
     return fig
 
 
@@ -88,7 +153,7 @@ def plot_local_comparison(ref_contour: np.ndarray, target_contour: np.ndarray, t
             x=tgt[:, 0],
             y=tgt[:, 1],
             mode="markers+lines",
-            marker=dict(size=6, color=d, colorscale="RdBu", colorbar=dict(title="error (px)"), showscale=True),
+            marker=dict(size=6, color=d, colorscale="Bluered", colorbar=dict(title="error (px)"), showscale=True),
             line=dict(width=2, color="black"),
             name="target",
             hovertemplate="index: %{pointNumber}<br>error: %{marker.color:.3f}<extra></extra>",
