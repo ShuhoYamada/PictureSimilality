@@ -10,3 +10,6 @@ previews/
 .ipynb_checkpoints/
 .pytest_cache/
 *.log
+# Ignore large or generated archives
+PictureSimilality.zip
+*.zip
