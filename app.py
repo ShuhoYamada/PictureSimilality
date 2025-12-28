@@ -1,5 +1,7 @@
 from typing import Optional
 import io
+import os
+from pathlib import Path
 
 import streamlit as st
 import numpy as np
@@ -12,12 +14,52 @@ st.set_page_config(page_title="2次元形状類似度解析", layout="wide")
 st.title("2次元形状類似度解析")
 
 st.sidebar.header("入力設定")
-# Allow multiple files for global view, but keep ability to inspect single image
-uploaded_files = st.sidebar.file_uploader(
-    "画像をアップロード (TIFF/PNG/JPG) — Global/Local 両対応",
-    accept_multiple_files=True,
-    type=["tif", "tiff", "png", "jpg", "jpeg"],
+
+# 入力方法の選択
+input_method = st.sidebar.radio(
+    "入力方法",
+    ["ファイルアップロード", "フォルダ指定（大量画像向け）"],
+    help="大量の画像（1000枚以上）の場合は「フォルダ指定」を推奨"
 )
+
+uploaded_files = None
+folder_files = []
+
+if input_method == "ファイルアップロード":
+    uploaded_files = st.sidebar.file_uploader(
+        "画像をアップロード (TIFF/PNG/JPG)",
+        accept_multiple_files=True,
+        type=["tif", "tiff", "png", "jpg", "jpeg"],
+    )
+else:
+    # フォルダパス指定
+    folder_path = st.sidebar.text_input(
+        "画像フォルダのパス",
+        placeholder="/Users/username/images",
+        help="画像ファイル(TIFF/PNG/JPG)が含まれるフォルダのパスを入力"
+    )
+    
+    if folder_path:
+        folder = Path(folder_path)
+        if folder.exists() and folder.is_dir():
+            # 画像ファイルを検索
+            extensions = ['.tif', '.tiff', '.png', '.jpg', '.jpeg']
+            for ext in extensions:
+                folder_files.extend(folder.glob(f'*{ext}'))
+                folder_files.extend(folder.glob(f'*{ext.upper()}'))
+            folder_files = sorted(set(folder_files))  # 重複排除とソート
+            
+            if folder_files:
+                st.sidebar.success(f"✅ {len(folder_files)}枚の画像を検出")
+            else:
+                st.sidebar.warning("画像ファイルが見つかりません")
+        elif folder_path:
+            st.sidebar.error("指定されたパスが存在しないか、フォルダではありません")
+
+# 画像があるかどうかのフラグ
+has_images = (uploaded_files and len(uploaded_files) > 0) or len(folder_files) > 0
+image_count = len(uploaded_files) if uploaded_files else len(folder_files)
+
 threshold = st.sidebar.slider("閾値 (0=Otsu)", 0, 255, 0)
 epsilon_factor = st.sidebar.slider("approx epsilon factor", 0.001, 0.05, 0.01)
 num_points = st.sidebar.slider("リサンプリング点数", 50, 1000, 200)
@@ -168,11 +210,12 @@ tabs = st.tabs(["Global Map", "Single Image", "Local Comparison", "類似画像�
 # --- Global Map Tab
 with tabs[0]:
     st.header("Global Map")
-    if not uploaded_files or len(uploaded_files) < 2:
-        st.info("複数の画像をサイドバーからアップロードしてください（2枚以上）。")
+    if not has_images or image_count < 2:
+        st.info("複数の画像をサイドバーからアップロードまたはフォルダ指定してください（2枚以上）。")
     else:
         # アップロード情報を表示
-        st.info(f"📁 アップロードされた画像: {len(uploaded_files)}枚")
+        source_type = "フォルダ" if input_method == "フォルダ指定（大量画像向け）" else "アップロード"
+        st.info(f"📁 {source_type}された画像: {image_count}枚")
         
         # セッション状態の初期化
         if 'global_map_analyzed' not in st.session_state:
@@ -194,12 +237,6 @@ with tabs[0]:
         if analyze_global:
             st.session_state.global_map_analyzed = False
             
-            # ファイルデータを準備
-            files_data = []
-            for f in uploaded_files:
-                f.seek(0)
-                files_data.append((f.name, f.read()))
-            
             # プログレスバーで進捗を表示
             progress_bar = st.progress(0, text="画像を読み込み中...")
             status_text = st.empty()
@@ -207,21 +244,46 @@ with tabs[0]:
             # 輪郭を抽出
             contours = {}
             skipped = []
-            total = len(files_data)
             
-            for i, (name, data) in enumerate(files_data):
-                try:
-                    contour, _ = _process_image(data, threshold, epsilon_factor, num_points, include_holes, min_hole_area)
-                    if contour is None:
-                        skipped.append(name)
-                    else:
-                        contours[name] = contour
-                except Exception:
-                    skipped.append(name)
+            # フォルダ指定の場合
+            if input_method == "フォルダ指定（大量画像向け）" and folder_files:
+                total = len(folder_files)
+                for i, file_path in enumerate(folder_files):
+                    try:
+                        with open(file_path, 'rb') as f:
+                            data = f.read()
+                        contour, _ = _process_image(data, threshold, epsilon_factor, num_points, include_holes, min_hole_area)
+                        if contour is None:
+                            skipped.append(file_path.name)
+                        else:
+                            contours[file_path.name] = contour
+                    except Exception:
+                        skipped.append(file_path.name)
+                    
+                    if (i + 1) % 100 == 0 or i == total - 1:
+                        progress = (i + 1) / total
+                        progress_bar.progress(progress, text=f"画像を読み込み中... ({i + 1}/{total})")
+            else:
+                # アップロードの場合
+                files_data = []
+                for f in uploaded_files:
+                    f.seek(0)
+                    files_data.append((f.name, f.read()))
                 
-                if (i + 1) % 100 == 0 or i == total - 1:
-                    progress = (i + 1) / total
-                    progress_bar.progress(progress, text=f"画像を読み込み中... ({i + 1}/{total})")
+                total = len(files_data)
+                for i, (name, data) in enumerate(files_data):
+                    try:
+                        contour, _ = _process_image(data, threshold, epsilon_factor, num_points, include_holes, min_hole_area)
+                        if contour is None:
+                            skipped.append(name)
+                        else:
+                            contours[name] = contour
+                    except Exception:
+                        skipped.append(name)
+                    
+                    if (i + 1) % 100 == 0 or i == total - 1:
+                        progress = (i + 1) / total
+                        progress_bar.progress(progress, text=f"画像を読み込み中... ({i + 1}/{total})")
             
             status_text.text(f"読み込み完了: {len(contours)}枚 (スキップ: {len(skipped)}枚)")
             
@@ -432,11 +494,12 @@ with tabs[3]:
     st.header("類似画像検索")
     st.write("画像を選択すると、似ている画像を類似度順に表示します。")
     
-    if not uploaded_files or len(uploaded_files) < 2:
-        st.info("複数の画像をサイドバーからアップロードしてください（2枚以上）。")
+    if not has_images or image_count < 2:
+        st.info("複数の画像をサイドバーからアップロードまたはフォルダ指定してください（2枚以上）。")
     else:
         # アップロード情報を表示
-        st.info(f"📁 アップロードされた画像: {len(uploaded_files)}枚")
+        source_type = "フォルダ" if input_method == "フォルダ指定（大量画像向け）" else "アップロード"
+        st.info(f"📁 {source_type}された画像: {image_count}枚")
         
         # セッション状態の初期化
         if 'similarity_analyzed' not in st.session_state:
@@ -462,13 +525,6 @@ with tabs[3]:
         if analyze_button:
             st.session_state.similarity_analyzed = False  # リセット
             
-            # ファイルデータを準備
-            files_data = []
-            for f in uploaded_files:
-                f.seek(0)
-                files_data.append((f.name, f.read()))
-            files_data_tuple = tuple(files_data)
-            
             # プログレスバーで進捗を表示
             progress_bar = st.progress(0, text="画像を読み込み中...")
             status_text = st.empty()
@@ -477,32 +533,66 @@ with tabs[3]:
             contours = {}
             images = {}
             skipped = []
-            total = len(files_data_tuple)
             
-            for i, (name, data) in enumerate(files_data_tuple):
-                try:
-                    from src.preprocessor import load_and_binarize_with_original, extract_contour, resample_contour
-                    original, binary = load_and_binarize_with_original(data, threshold if threshold > 0 else None)
-                    contour_data = extract_contour(binary, epsilon_factor, include_holes=include_holes, min_hole_area=min_hole_area)
-                    if contour_data is None:
-                        skipped.append(name)
-                    else:
-                        if include_holes and isinstance(contour_data, tuple):
-                            outer, holes, islands = contour_data
-                            outer_resampled = resample_contour(outer, num_points)
-                            holes_resampled = [resample_contour(h, max(20, int(num_points * len(h) / max(len(outer), 1)))) for h in holes]
-                            islands_resampled = [resample_contour(isl, max(20, int(num_points * len(isl) / max(len(outer), 1)))) for isl in islands]
-                            contours[name] = (outer_resampled, holes_resampled, islands_resampled)
+            # フォルダ指定の場合
+            if input_method == "フォルダ指定（大量画像向け）" and folder_files:
+                total = len(folder_files)
+                for i, file_path in enumerate(folder_files):
+                    try:
+                        from src.preprocessor import load_and_binarize_with_original, extract_contour, resample_contour
+                        with open(file_path, 'rb') as f:
+                            data = f.read()
+                        original, binary = load_and_binarize_with_original(data, threshold if threshold > 0 else None)
+                        contour_data = extract_contour(binary, epsilon_factor, include_holes=include_holes, min_hole_area=min_hole_area)
+                        if contour_data is None:
+                            skipped.append(file_path.name)
                         else:
-                            contours[name] = resample_contour(contour_data, num_points)
-                        images[name] = original
-                except Exception:
-                    skipped.append(name)
+                            if include_holes and isinstance(contour_data, tuple):
+                                outer, holes, islands = contour_data
+                                outer_resampled = resample_contour(outer, num_points)
+                                holes_resampled = [resample_contour(h, max(20, int(num_points * len(h) / max(len(outer), 1)))) for h in holes]
+                                islands_resampled = [resample_contour(isl, max(20, int(num_points * len(isl) / max(len(outer), 1)))) for isl in islands]
+                                contours[file_path.name] = (outer_resampled, holes_resampled, islands_resampled)
+                            else:
+                                contours[file_path.name] = resample_contour(contour_data, num_points)
+                            images[file_path.name] = original
+                    except Exception:
+                        skipped.append(file_path.name)
+                    
+                    if (i + 1) % 100 == 0 or i == total - 1:
+                        progress = (i + 1) / total
+                        progress_bar.progress(progress, text=f"画像を読み込み中... ({i + 1}/{total})")
+            else:
+                # アップロードの場合
+                files_data = []
+                for f in uploaded_files:
+                    f.seek(0)
+                    files_data.append((f.name, f.read()))
                 
-                # 進捗更新（100件ごと）
-                if (i + 1) % 100 == 0 or i == total - 1:
-                    progress = (i + 1) / total
-                    progress_bar.progress(progress, text=f"画像を読み込み中... ({i + 1}/{total})")
+                total = len(files_data)
+                for i, (name, data) in enumerate(files_data):
+                    try:
+                        from src.preprocessor import load_and_binarize_with_original, extract_contour, resample_contour
+                        original, binary = load_and_binarize_with_original(data, threshold if threshold > 0 else None)
+                        contour_data = extract_contour(binary, epsilon_factor, include_holes=include_holes, min_hole_area=min_hole_area)
+                        if contour_data is None:
+                            skipped.append(name)
+                        else:
+                            if include_holes and isinstance(contour_data, tuple):
+                                outer, holes, islands = contour_data
+                                outer_resampled = resample_contour(outer, num_points)
+                                holes_resampled = [resample_contour(h, max(20, int(num_points * len(h) / max(len(outer), 1)))) for h in holes]
+                                islands_resampled = [resample_contour(isl, max(20, int(num_points * len(isl) / max(len(outer), 1)))) for isl in islands]
+                                contours[name] = (outer_resampled, holes_resampled, islands_resampled)
+                            else:
+                                contours[name] = resample_contour(contour_data, num_points)
+                            images[name] = original
+                    except Exception:
+                        skipped.append(name)
+                    
+                    if (i + 1) % 100 == 0 or i == total - 1:
+                        progress = (i + 1) / total
+                        progress_bar.progress(progress, text=f"画像を読み込み中... ({i + 1}/{total})")
             
             status_text.text(f"読み込み完了: {len(contours)}枚 (スキップ: {len(skipped)}枚)")
             
