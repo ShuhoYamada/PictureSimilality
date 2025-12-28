@@ -171,34 +171,91 @@ with tabs[0]:
     if not uploaded_files or len(uploaded_files) < 2:
         st.info("複数の画像をサイドバーからアップロードしてください（2枚以上）。")
     else:
-        # ファイルデータを事前に読み込んでタプルに変換（キャッシュ対応）
-        files_data = []
-        for f in uploaded_files:
-            f.seek(0)  # ファイルポインタをリセット
-            files_data.append((f.name, f.read()))
-        files_data_tuple = tuple(files_data)
+        # アップロード情報を表示
+        st.info(f"📁 アップロードされた画像: {len(uploaded_files)}枚")
         
-        df_skipped = _process_multiple(files_data_tuple, threshold, epsilon_factor, num_points, num_fourier, method, include_holes, min_hole_area)
-        # _process_multiple returns either (df, skipped) or (None, skipped) or None
-        if df_skipped is None or df_skipped[0] is None:
-            skipped = [] if df_skipped is None else df_skipped[1]
-            st.error("有効な輪郭を持つ画像が2枚以上見つかりませんでした。パラメータを調整してください。")
-            if skipped:
-                st.warning(f"以下のファイルは輪郭抽出に失敗しました: {skipped}")
-        else:
-            df, skipped = df_skipped
+        # セッション状態の初期化
+        if 'global_map_analyzed' not in st.session_state:
+            st.session_state.global_map_analyzed = False
+        if 'global_map_df' not in st.session_state:
+            st.session_state.global_map_df = None
+        if 'global_map_skipped' not in st.session_state:
+            st.session_state.global_map_skipped = []
+        
+        # 解析ボタン
+        col_btn1, col_btn2 = st.columns([1, 3])
+        with col_btn1:
+            analyze_global = st.button("🔬 解析開始", type="primary", use_container_width=True, key="global_analyze")
+        with col_btn2:
+            if st.session_state.global_map_analyzed and st.session_state.global_map_df is not None:
+                st.success(f"✅ 解析済み: {len(st.session_state.global_map_df)}枚")
+        
+        # 解析ボタンが押されたら処理を開始
+        if analyze_global:
+            st.session_state.global_map_analyzed = False
             
-            # クラスタリングを適用
-            if enable_clustering and cluster_params is not None:
-                from src.global_features import cluster_shapes, compute_cluster_stats
-                df = cluster_shapes(df, **cluster_params)
-                cluster_stats = compute_cluster_stats(df)
+            # ファイルデータを準備
+            files_data = []
+            for f in uploaded_files:
+                f.seek(0)
+                files_data.append((f.name, f.read()))
             
-            # 処理成功数を表示
-            st.success(f"✅ {len(df)}枚の画像を解析しました")
+            # プログレスバーで進捗を表示
+            progress_bar = st.progress(0, text="画像を読み込み中...")
+            status_text = st.empty()
+            
+            # 輪郭を抽出
+            contours = {}
+            skipped = []
+            total = len(files_data)
+            
+            for i, (name, data) in enumerate(files_data):
+                try:
+                    contour, _ = _process_image(data, threshold, epsilon_factor, num_points, include_holes, min_hole_area)
+                    if contour is None:
+                        skipped.append(name)
+                    else:
+                        contours[name] = contour
+                except Exception:
+                    skipped.append(name)
+                
+                if (i + 1) % 100 == 0 or i == total - 1:
+                    progress = (i + 1) / total
+                    progress_bar.progress(progress, text=f"画像を読み込み中... ({i + 1}/{total})")
+            
+            status_text.text(f"読み込み完了: {len(contours)}枚 (スキップ: {len(skipped)}枚)")
+            
+            if len(contours) >= 2:
+                # 埋め込み計算
+                progress_bar.progress(0.5, text="埋め込みを計算中...")
+                from src.global_features import compute_global_embedding
+                
+                df, skipped_more = compute_global_embedding(contours, num_fourier=num_fourier, method=method)
+                skipped.extend(skipped_more)
+                
+                # クラスタリングを適用
+                if enable_clustering and cluster_params is not None:
+                    progress_bar.progress(0.8, text="クラスタリング中...")
+                    from src.global_features import cluster_shapes
+                    df = cluster_shapes(df, **cluster_params)
+                
+                st.session_state.global_map_df = df
+                st.session_state.global_map_skipped = skipped
+                st.session_state.global_map_analyzed = True
+                
+                progress_bar.progress(1.0, text="完了!")
+                st.rerun()
+            else:
+                st.error("有効な輪郭を持つ画像が2枚以上見つかりませんでした。")
+        
+        # 解析済みの場合、結果を表示
+        if st.session_state.global_map_analyzed and st.session_state.global_map_df is not None:
+            df = st.session_state.global_map_df
+            skipped = st.session_state.global_map_skipped
+            
+            st.markdown("---")
             
             from src.visualizer import plot_global_map
-
             fig = plot_global_map(df, show_clusters=enable_clustering)
             st.plotly_chart(fig, use_container_width=True)
             
@@ -206,7 +263,6 @@ with tabs[0]:
             if enable_clustering and "cluster" in df.columns:
                 st.subheader("📊 クラスタリング結果")
                 
-                # クラスタごとのサマリー
                 n_clusters = df["cluster"].nunique()
                 noise_count = len(df[df["cluster"] == -1]) if -1 in df["cluster"].values else 0
                 
@@ -219,7 +275,6 @@ with tabs[0]:
                     if noise_count > 0:
                         st.metric("ノイズ（未分類）", noise_count)
                 
-                # クラスタごとのメンバー一覧
                 with st.expander("🗂️ クラスタ別メンバー一覧"):
                     for cluster_id in sorted(df["cluster"].unique()):
                         if cluster_id == -1:
@@ -230,7 +285,6 @@ with tabs[0]:
                         st.write(", ".join(members))
                         st.markdown("---")
             
-            # 埋め込み座標データを表示（オプション）
             with st.expander("📊 埋め込み座標データを表示"):
                 st.dataframe(df)
 
@@ -240,33 +294,65 @@ with tabs[0]:
 # --- Single Image Tab
 with tabs[1]:
     st.header("Single Image Inspection")
-    st.write("左のサイドバーから単一ファイルを選択して輪郭を確認できます。")
+    st.write("単一の画像をアップロードして輪郭を確認できます。")
     single = st.file_uploader("単一画像 (Single inspection)", accept_multiple_files=False, type=["tif", "tiff", "png", "jpg", "jpeg"], key="single")
+    
     if single is None:
         st.info("ここでは1枚の画像を選んで輪郭を確認できます。")
     else:
-        try:
-            file_bytes = single.read()
-            contour, original, binary = _process_image_with_original(file_bytes, threshold if threshold > 0 else None, epsilon_factor, num_points, include_holes, min_hole_area)
+        # セッション状態の初期化
+        if 'single_analyzed' not in st.session_state:
+            st.session_state.single_analyzed = False
+        if 'single_result' not in st.session_state:
+            st.session_state.single_result = None
+        
+        # 解析ボタン
+        col_btn1, col_btn2 = st.columns([1, 3])
+        with col_btn1:
+            analyze_single = st.button("🔬 解析開始", type="primary", use_container_width=True, key="single_analyze")
+        with col_btn2:
+            if st.session_state.single_analyzed:
+                st.success("✅ 解析済み")
+        
+        if analyze_single:
+            try:
+                single.seek(0)
+                file_bytes = single.read()
+                contour, original, binary = _process_image_with_original(file_bytes, threshold if threshold > 0 else None, epsilon_factor, num_points, include_holes, min_hole_area)
+                
+                st.session_state.single_result = {
+                    'contour': contour,
+                    'original': original,
+                    'binary': binary,
+                    'name': single.name
+                }
+                st.session_state.single_analyzed = True
+                st.rerun()
+            except Exception as e:
+                st.exception(e)
+        
+        # 解析済みの場合、結果を表示
+        if st.session_state.single_analyzed and st.session_state.single_result:
+            result = st.session_state.single_result
+            
+            st.markdown("---")
             
             # 元画像と処理後画像を並べて表示
             st.subheader("画像比較")
             img_col1, img_col2 = st.columns(2)
             with img_col1:
-                st.image(original, caption="元画像 (Original)", use_container_width=True)
+                st.image(result['original'], caption="元画像 (Original)", use_container_width=True)
             with img_col2:
-                st.image(binary, caption="二値化画像 (Binarized)", use_container_width=True)
+                st.image(result['binary'], caption="二値化画像 (Binarized)", use_container_width=True)
             
             st.markdown("---")
             
-            if contour is None:
+            if result['contour'] is None:
                 st.error("輪郭が検出できませんでした。閾値設定や画像を確認してください。")
             else:
                 st.subheader("抽出された輪郭")
-                fig = plot_contour(contour, title=single.name)
+                fig = plot_contour(result['contour'], title=result['name'])
                 st.plotly_chart(fig, use_container_width=True)
-        except Exception as e:
-            st.exception(e)
 
 # --- Local Comparison Tab
 with tabs[2]:
