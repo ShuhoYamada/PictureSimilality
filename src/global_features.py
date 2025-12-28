@@ -211,10 +211,16 @@ def compute_fourier_descriptors_with_holes(
     
     # 穴の数と総面積比も特徴として追加
     num_holes = len(holes) if holes else 0
-    outer_area = cv2.contourArea(outer)
+    # OpenCVのcontourAreaはint32またはfloat32を期待
+    outer_for_area = outer.astype(np.float32).reshape(-1, 1, 2)
+    outer_area = cv2.contourArea(outer_for_area)
     hole_area_ratio = 0.0
     if holes and outer_area > 0:
-        total_hole_area = sum(cv2.contourArea(h) for h in holes if len(h) >= 3)
+        total_hole_area = 0.0
+        for h in holes:
+            if len(h) >= 3:
+                h_for_area = h.astype(np.float32).reshape(-1, 1, 2)
+                total_hole_area += cv2.contourArea(h_for_area)
         hole_area_ratio = total_hole_area / outer_area
     
     all_coeffs.append(float(num_holes) / 10.0)  # 正規化（最大10個の穴を想定）
