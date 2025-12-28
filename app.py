@@ -349,33 +349,117 @@ with tabs[3]:
     if not uploaded_files or len(uploaded_files) < 2:
         st.info("複数の画像をサイドバーからアップロードしてください（2枚以上）。")
     else:
-        # ファイルデータを準備
-        files_data = []
-        for f in uploaded_files:
-            f.seek(0)
-            files_data.append((f.name, f.read()))
-        files_data_tuple = tuple(files_data)
+        # アップロード情報を表示
+        st.info(f"📁 アップロードされた画像: {len(uploaded_files)}枚")
         
-        # 輪郭と画像を取得
-        with st.spinner("画像を処理中..."):
-            contours, images, skipped = _get_contours_and_images(
-                files_data_tuple, threshold, epsilon_factor, num_points, include_holes, min_hole_area
-            )
+        # セッション状態の初期化
+        if 'similarity_analyzed' not in st.session_state:
+            st.session_state.similarity_analyzed = False
+        if 'similarity_contours' not in st.session_state:
+            st.session_state.similarity_contours = None
+        if 'similarity_images' not in st.session_state:
+            st.session_state.similarity_images = None
+        if 'similarity_features' not in st.session_state:
+            st.session_state.similarity_features = None
+        if 'similarity_skipped' not in st.session_state:
+            st.session_state.similarity_skipped = []
         
-        if len(contours) < 2:
-            st.error("有効な輪郭を持つ画像が2枚以上見つかりませんでした。")
-        else:
-            # 特徴量を事前計算（キャッシュ）
-            @st.cache_data
-            def _compute_features_cached(contours_keys: tuple, _contours: dict, _num_fourier: int):
-                """特徴量を計算してキャッシュ"""
-                from src.global_features import compute_all_features
-                return compute_all_features(_contours, _num_fourier, use_holes=True)
+        # 解析ボタン
+        col_btn1, col_btn2 = st.columns([1, 3])
+        with col_btn1:
+            analyze_button = st.button("🔬 解析開始", type="primary", use_container_width=True)
+        with col_btn2:
+            if st.session_state.similarity_analyzed:
+                st.success(f"✅ 解析済み: {len(st.session_state.similarity_contours)}枚")
+        
+        # 解析ボタンが押されたら処理を開始
+        if analyze_button:
+            st.session_state.similarity_analyzed = False  # リセット
             
-            # 特徴量を計算
-            contours_keys = tuple(sorted(contours.keys()))
-            with st.spinner(f"特徴量を計算中... ({len(contours)}枚)"):
-                precomputed_features = _compute_features_cached(contours_keys, contours, num_fourier)
+            # ファイルデータを準備
+            files_data = []
+            for f in uploaded_files:
+                f.seek(0)
+                files_data.append((f.name, f.read()))
+            files_data_tuple = tuple(files_data)
+            
+            # プログレスバーで進捗を表示
+            progress_bar = st.progress(0, text="画像を読み込み中...")
+            status_text = st.empty()
+            
+            # 輪郭と画像を取得（バッチ処理）
+            contours = {}
+            images = {}
+            skipped = []
+            total = len(files_data_tuple)
+            
+            for i, (name, data) in enumerate(files_data_tuple):
+                try:
+                    from src.preprocessor import load_and_binarize_with_original, extract_contour, resample_contour
+                    original, binary = load_and_binarize_with_original(data, threshold if threshold > 0 else None)
+                    contour_data = extract_contour(binary, epsilon_factor, include_holes=include_holes, min_hole_area=min_hole_area)
+                    if contour_data is None:
+                        skipped.append(name)
+                    else:
+                        if include_holes and isinstance(contour_data, tuple):
+                            outer, holes, islands = contour_data
+                            outer_resampled = resample_contour(outer, num_points)
+                            holes_resampled = [resample_contour(h, max(20, int(num_points * len(h) / max(len(outer), 1)))) for h in holes]
+                            islands_resampled = [resample_contour(isl, max(20, int(num_points * len(isl) / max(len(outer), 1)))) for isl in islands]
+                            contours[name] = (outer_resampled, holes_resampled, islands_resampled)
+                        else:
+                            contours[name] = resample_contour(contour_data, num_points)
+                        images[name] = original
+                except Exception:
+                    skipped.append(name)
+                
+                # 進捗更新（100件ごと）
+                if (i + 1) % 100 == 0 or i == total - 1:
+                    progress = (i + 1) / total
+                    progress_bar.progress(progress, text=f"画像を読み込み中... ({i + 1}/{total})")
+            
+            status_text.text(f"読み込み完了: {len(contours)}枚 (スキップ: {len(skipped)}枚)")
+            
+            if len(contours) >= 2:
+                # 特徴量を計算
+                progress_bar.progress(0, text="特徴量を計算中...")
+                from src.global_features import compute_all_features
+                
+                features = {}
+                total_contours = len(contours)
+                for i, (name, contour) in enumerate(contours.items()):
+                    try:
+                        from src.global_features import compute_feature_vector
+                        feat = compute_feature_vector(contour, num_fourier, use_holes=True)
+                        if feat is not None:
+                            features[name] = feat
+                    except Exception:
+                        pass
+                    
+                    if (i + 1) % 100 == 0 or i == total_contours - 1:
+                        progress = (i + 1) / total_contours
+                        progress_bar.progress(progress, text=f"特徴量を計算中... ({i + 1}/{total_contours})")
+                
+                # セッション状態に保存
+                st.session_state.similarity_contours = contours
+                st.session_state.similarity_images = images
+                st.session_state.similarity_features = features
+                st.session_state.similarity_skipped = skipped
+                st.session_state.similarity_analyzed = True
+                
+                progress_bar.progress(1.0, text="完了!")
+                st.success(f"✅ 解析完了: {len(contours)}枚の画像から{len(features)}個の特徴量を抽出しました")
+                st.rerun()
+            else:
+                st.error("有効な輪郭を持つ画像が2枚以上見つかりませんでした。")
+        
+        # 解析済みの場合、結果を表示
+        if st.session_state.similarity_analyzed and st.session_state.similarity_contours:
+            contours = st.session_state.similarity_contours
+            images = st.session_state.similarity_images
+            precomputed_features = st.session_state.similarity_features
+            
+            st.markdown("---")
             
             # 検索対象の画像を選択
             available_images = list(contours.keys())
