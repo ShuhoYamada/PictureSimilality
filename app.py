@@ -51,23 +51,54 @@ else:
 
 @st.cache_data
 def _process_image(file_bytes: bytes, threshold: int, epsilon_factor: float, num_points: int, include_holes: bool = True, min_hole_area: int = 100):
+    """画像を処理して輪郭データを取得
+    
+    Returns:
+        include_holes=True の場合: ((outer, holes, islands), binary)
+        include_holes=False の場合: (outer, binary)
+    """
     binary = load_and_binarize(file_bytes, threshold if threshold > 0 else None)
-    contour = extract_contour(binary, epsilon_factor, include_holes=include_holes, min_hole_area=min_hole_area)
-    if contour is None:
+    contour_data = extract_contour(binary, epsilon_factor, include_holes=include_holes, min_hole_area=min_hole_area)
+    if contour_data is None:
         return None, binary
-    resampled = resample_contour(contour, num_points)
-    return resampled, binary
+    
+    if include_holes and isinstance(contour_data, tuple):
+        # タプルの場合: (outer, holes, islands)
+        outer, holes, islands = contour_data
+        outer_resampled = resample_contour(outer, num_points)
+        # 穴と島もリサンプリング（点数は比例配分）
+        holes_resampled = []
+        for hole in holes:
+            hole_pts = max(20, int(num_points * len(hole) / max(len(outer), 1)))
+            holes_resampled.append(resample_contour(hole, hole_pts))
+        islands_resampled = []
+        for island in islands:
+            island_pts = max(20, int(num_points * len(island) / max(len(outer), 1)))
+            islands_resampled.append(resample_contour(island, island_pts))
+        return (outer_resampled, holes_resampled, islands_resampled), binary
+    else:
+        # 単純な配列の場合
+        resampled = resample_contour(contour_data, num_points)
+        return resampled, binary
 
 
 @st.cache_data
 def _process_image_with_original(file_bytes: bytes, threshold: int, epsilon_factor: float, num_points: int, include_holes: bool = True, min_hole_area: int = 100):
     """元画像も一緒に返す処理関数"""
     original, binary = load_and_binarize_with_original(file_bytes, threshold if threshold > 0 else None)
-    contour = extract_contour(binary, epsilon_factor, include_holes=include_holes, min_hole_area=min_hole_area)
-    if contour is None:
+    contour_data = extract_contour(binary, epsilon_factor, include_holes=include_holes, min_hole_area=min_hole_area)
+    if contour_data is None:
         return None, original, binary
-    resampled = resample_contour(contour, num_points)
-    return resampled, original, binary
+    
+    if include_holes and isinstance(contour_data, tuple):
+        outer, holes, islands = contour_data
+        outer_resampled = resample_contour(outer, num_points)
+        holes_resampled = [resample_contour(h, max(20, int(num_points * len(h) / max(len(outer), 1)))) for h in holes]
+        islands_resampled = [resample_contour(isl, max(20, int(num_points * len(isl) / max(len(outer), 1)))) for isl in islands]
+        return (outer_resampled, holes_resampled, islands_resampled), original, binary
+    else:
+        resampled = resample_contour(contour_data, num_points)
+        return resampled, original, binary
 
 
 @st.cache_data
@@ -98,7 +129,13 @@ def _process_multiple(files_data: tuple, threshold: int, epsilon: float, num_poi
 # 画像データを保持するためのキャッシュ関数
 @st.cache_data
 def _get_contours_and_images(files_data: tuple, threshold: int, epsilon: float, num_points: int, include_holes: bool, min_hole_area: int):
-    """輪郭と元画像データを取得"""
+    """輪郭と元画像データを取得
+    
+    Returns:
+        contours: {name: contour_data} - contour_dataは(outer, holes, islands)タプルまたはnp.ndarray
+        images: {name: original_image}
+        skipped: list of skipped file names
+    """
     contours = {}
     images = {}  # 元画像を保持
     skipped = []
@@ -106,12 +143,19 @@ def _get_contours_and_images(files_data: tuple, threshold: int, epsilon: float, 
     for name, data in files_data:
         try:
             original, binary = load_and_binarize_with_original(data, threshold if threshold > 0 else None)
-            contour = extract_contour(binary, epsilon, include_holes=include_holes, min_hole_area=min_hole_area)
-            if contour is None:
+            contour_data = extract_contour(binary, epsilon, include_holes=include_holes, min_hole_area=min_hole_area)
+            if contour_data is None:
                 skipped.append(name)
             else:
-                resampled = resample_contour(contour, num_points)
-                contours[name] = resampled
+                # 輪郭データをリサンプリング
+                if include_holes and isinstance(contour_data, tuple):
+                    outer, holes, islands = contour_data
+                    outer_resampled = resample_contour(outer, num_points)
+                    holes_resampled = [resample_contour(h, max(20, int(num_points * len(h) / max(len(outer), 1)))) for h in holes]
+                    islands_resampled = [resample_contour(isl, max(20, int(num_points * len(isl) / max(len(outer), 1)))) for isl in islands]
+                    contours[name] = (outer_resampled, holes_resampled, islands_resampled)
+                else:
+                    contours[name] = resample_contour(contour_data, num_points)
                 images[name] = original  # 元画像を保存
         except Exception:
             skipped.append(name)

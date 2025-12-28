@@ -1,9 +1,14 @@
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple, Union, List
 import io
 
 import cv2
 import numpy as np
 from PIL import Image
+
+
+# 型エイリアス：穴対応の輪郭データ
+# (外側輪郭, 穴リスト, 島リスト) のタプル
+ContourWithHoles = Tuple[np.ndarray, List[np.ndarray], List[np.ndarray]]
 
 
 def load_image(image_input: Union[str, bytes, io.BytesIO]) -> np.ndarray:
@@ -85,10 +90,13 @@ def load_and_binarize_with_original(image_input: Union[str, bytes, io.BytesIO], 
     return original, binary
 
 
-def extract_contour(binary_image: np.ndarray, epsilon_factor: float = 0.01, include_holes: bool = True, min_hole_area: float = 100) -> Optional[np.ndarray]:
+def extract_contour(binary_image: np.ndarray, epsilon_factor: float = 0.01, include_holes: bool = True, min_hole_area: float = 100) -> Optional[Union[np.ndarray, ContourWithHoles]]:
     """Extract the largest contour from a binary image and approximate it.
 
-    Returns None if no contour is found.
+    Returns:
+        - include_holes=True: (outer_contour, holes_list, islands_list) のタプル
+        - include_holes=False: outer_contour のみ（np.ndarray）
+        - 輪郭が見つからない場合: None
     
     Parameters:
         binary_image: 二値化画像
@@ -155,66 +163,34 @@ def extract_contour(binary_image: np.ndarray, epsilon_factor: float = 0.01, incl
     if not include_holes:
         return pts_outer
     
-    # 階層構造を再帰的にたどって、全ての子輪郭を収集
-    def collect_all_descendants(parent_idx):
-        """指定した輪郭の全ての子孫を収集（階層レベル付き）"""
-        descendants = []
+    # 階層構造を再帰的にたどって、穴と島を分離して収集
+    holes_list: List[np.ndarray] = []
+    islands_list: List[np.ndarray] = []
+    
+    def collect_descendants_separated(parent_idx, depth=0):
+        """指定した輪郭の全ての子孫を収集（穴と島を分離）"""
         child_idx = hierarchy[parent_idx][2]  # first child
         
         while child_idx != -1:
             area = cv2.contourArea(contours[child_idx])
             if area >= min_hole_area:
-                # 階層の深さを計算
-                depth = 1
-                p = parent_idx
-                while hierarchy[p][3] != -1:
-                    depth += 1
-                    p = hierarchy[p][3]
+                pts = approximate_contour(contours[child_idx])
+                is_hole = (depth % 2 == 0)  # 偶数深さ（0, 2, 4...）の子は穴
                 
-                descendants.append({
-                    'idx': child_idx,
-                    'contour': contours[child_idx],
-                    'area': area,
-                    'depth': depth,
-                    'is_hole': (depth % 2 == 1)  # 奇数階層は穴、偶数階層は島
-                })
+                if is_hole:
+                    holes_list.append(pts)
+                else:
+                    islands_list.append(pts)
                 
                 # 子の子も再帰的に収集
-                descendants.extend(collect_all_descendants(child_idx))
+                collect_descendants_separated(child_idx, depth + 1)
             
             child_idx = hierarchy[child_idx][0]  # next sibling
-        
-        return descendants
     
-    all_inner_contours = collect_all_descendants(main_idx)
+    collect_descendants_separated(main_idx)
     
-    if not all_inner_contours:
-        return pts_outer
-    
-    # 全ての輪郭を収集（外側 + 穴 + 島 + ...）
-    all_pts_list = [('outer', pts_outer, False)]  # (type, points, is_hole)
-    
-    for info in all_inner_contours:
-        pts = approximate_contour(info['contour'])
-        all_pts_list.append((
-            'hole' if info['is_hole'] else 'island',
-            pts,
-            info['is_hole']
-        ))
-    
-    # 全ての点を連結
-    combined = []
-    for i, (ctype, pts, is_hole) in enumerate(all_pts_list):
-        if i > 0:
-            # 前の輪郭から現在の輪郭への接続
-            combined.append(all_pts_list[0][1][0])  # 外側の始点に戻る
-            combined.append(pts[0])  # 現在の輪郭の始点へ
-        combined.extend(pts.tolist())
-    
-    # 最後に外側の始点に戻る
-    combined.append(all_pts_list[0][1][0])
-    
-    return np.array(combined, dtype=float)
+    # タプルとして返す: (外側輪郭, 穴リスト, 島リスト)
+    return (pts_outer, holes_list, islands_list)
 
 
 def extract_contour_hierarchical(binary_image: np.ndarray, epsilon_factor: float = 0.01, min_area: float = 100) -> Optional[dict]:

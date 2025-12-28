@@ -1,4 +1,4 @@
-from typing import Dict, Tuple, List, Optional
+from typing import Dict, Tuple, List, Optional, Union
 
 import warnings
 
@@ -10,16 +10,47 @@ from sklearn.manifold import MDS, TSNE
 from sklearn.cluster import KMeans, DBSCAN, AgglomerativeClustering
 
 
-def compute_hu_moments(contour: np.ndarray) -> np.ndarray:
+# 型エイリアス：穴対応の輪郭データ
+ContourWithHoles = Tuple[np.ndarray, List[np.ndarray], List[np.ndarray]]
+ContourData = Union[np.ndarray, ContourWithHoles]
+
+
+def _extract_outer_contour(contour: ContourData) -> Optional[np.ndarray]:
+    """輪郭データから外側輪郭を取得"""
+    if contour is None:
+        return None
+    if isinstance(contour, tuple):
+        return contour[0]
+    return contour
+
+
+def _extract_holes(contour: ContourData) -> List[np.ndarray]:
+    """輪郭データから穴リストを取得"""
+    if isinstance(contour, tuple) and len(contour) > 1:
+        return contour[1]
+    return []
+
+
+def _extract_islands(contour: ContourData) -> List[np.ndarray]:
+    """輪郭データから島リストを取得"""
+    if isinstance(contour, tuple) and len(contour) > 2:
+        return contour[2]
+    return []
+
+
+def compute_hu_moments(contour: ContourData) -> np.ndarray:
     """Compute Hu moments (7,) with log transform: -sign(h) * log10(|h|).
 
-    contour: (N,2) array
+    contour: (N,2) array または (outer, holes, islands) のタプル
+    穴がある場合は外側輪郭のみ使用
     """
-    if contour is None or len(contour) < 3:
+    outer = _extract_outer_contour(contour)
+    
+    if outer is None or len(outer) < 3:
         raise ValueError("Contour must have at least 3 points to compute moments.")
 
     # OpenCV expects contour in int coordinates as Nx1x2 for moments if using as contour
-    cnt = contour.astype(np.float64)
+    cnt = outer.astype(np.float64)
     # Create a mask-like moments input by converting to proper shape
     # However cv2.moments accepts a point array as well
     m = cv2.moments(cnt)
@@ -35,15 +66,63 @@ def compute_hu_moments(contour: np.ndarray) -> np.ndarray:
     return out
 
 
-def compute_fourier_descriptors(contour: np.ndarray, num_coeffs: int = 16) -> np.ndarray:
+def compute_hu_moments_with_holes(
+    contour: ContourData
+) -> np.ndarray:
+    """穴と島を考慮したHuモーメントを計算
+    
+    外側輪郭のモーメントから穴のモーメントを引き、島のモーメントを足す
+    これにより穴のある形状をより正確に表現できる
+    """
+    outer = _extract_outer_contour(contour)
+    holes = _extract_holes(contour)
+    islands = _extract_islands(contour)
+    
+    if outer is None or len(outer) < 3:
+        raise ValueError("Outer contour must have at least 3 points.")
+    
+    # 外側輪郭のモーメント
+    m_outer = cv2.moments(outer.astype(np.float64))
+    
+    # 穴のモーメントを引く
+    if holes:
+        for hole in holes:
+            if len(hole) >= 3:
+                m_hole = cv2.moments(hole.astype(np.float64))
+                for key in m_outer.keys():
+                    m_outer[key] -= m_hole[key]
+    
+    # 島のモーメントを足す
+    if islands:
+        for island in islands:
+            if len(island) >= 3:
+                m_island = cv2.moments(island.astype(np.float64))
+                for key in m_outer.keys():
+                    m_outer[key] += m_island[key]
+    
+    hu = cv2.HuMoments(m_outer).flatten()
+    
+    out = np.zeros_like(hu, dtype=float)
+    for i, h in enumerate(hu):
+        if h == 0:
+            out[i] = 0.0
+        else:
+            out[i] = -np.sign(h) * np.log10(abs(h) + 1e-10)
+    return out
+
+
+def compute_fourier_descriptors(contour: ContourData, num_coeffs: int = 16) -> np.ndarray:
     """Compute low-frequency Fourier descriptors invariant to translation/scale/rotation.
 
     Returns a real-valued vector of length `num_coeffs`.
+    穴がある場合は外側輪郭のみ使用
     """
-    if contour is None or len(contour) < 3:
+    outer = _extract_outer_contour(contour)
+    
+    if outer is None or len(outer) < 3:
         raise ValueError("Contour must have at least 3 points for Fourier descriptors.")
 
-    pts = np.asarray(contour, dtype=float)
+    pts = np.asarray(outer, dtype=float)
     # Represent as complex numbers
     z = pts[:, 0] + 1j * pts[:, 1]
     # Remove translation
@@ -68,13 +147,97 @@ def compute_fourier_descriptors(contour: np.ndarray, num_coeffs: int = 16) -> np
     return coeffs.astype(float)
 
 
+def compute_fourier_descriptors_with_holes(
+    contour: ContourData,
+    num_coeffs: int = 16
+) -> np.ndarray:
+    """穴と島を考慮したフーリエ記述子を計算
+    
+    外側輪郭のフーリエ記述子に加えて、穴の情報も特徴量として追加
+    
+    Returns:
+        特徴量ベクトル (長さ: num_coeffs * 2 + 2)
+        - 外側輪郭のフーリエ記述子
+        - 全穴のフーリエ記述子の合計
+        - 穴の数（正規化）
+        - 穴の面積比
+    """
+    outer = _extract_outer_contour(contour)
+    holes = _extract_holes(contour)
+    
+    if outer is None or len(outer) < 3:
+        raise ValueError("Outer contour must have at least 3 points.")
+    
+    all_coeffs = []
+    
+    # 外側輪郭のフーリエ記述子
+    pts = outer.astype(float)
+    z = pts[:, 0] + 1j * pts[:, 1]
+    z -= np.mean(z)
+    Z = np.fft.fft(z)
+    mags = np.abs(Z)
+    
+    # 正規化用のスケール
+    outer_scale = mags[1] if len(mags) > 1 and mags[1] > 0 else 1.0
+    
+    # 外側輪郭の係数
+    if len(mags) - 1 < num_coeffs:
+        outer_coeffs = mags[1:]
+        outer_coeffs = np.pad(outer_coeffs, (0, num_coeffs - len(outer_coeffs)), constant_values=0.0)
+    else:
+        outer_coeffs = mags[1:num_coeffs + 1]
+    outer_coeffs = outer_coeffs / outer_scale
+    all_coeffs.extend(outer_coeffs)
+    
+    # 穴の係数（合計）
+    hole_coeffs_sum = np.zeros(num_coeffs)
+    if holes:
+        for hole in holes:
+            if len(hole) >= 3:
+                pts_h = hole.astype(float)
+                z_h = pts_h[:, 0] + 1j * pts_h[:, 1]
+                z_h -= np.mean(z_h)
+                Z_h = np.fft.fft(z_h)
+                mags_h = np.abs(Z_h)
+                if len(mags_h) - 1 < num_coeffs:
+                    coeffs_h = mags_h[1:]
+                    coeffs_h = np.pad(coeffs_h, (0, num_coeffs - len(coeffs_h)), constant_values=0.0)
+                else:
+                    coeffs_h = mags_h[1:num_coeffs + 1]
+                hole_coeffs_sum += coeffs_h / outer_scale
+    
+    # 穴の情報を追加
+    all_coeffs.extend(hole_coeffs_sum)
+    
+    # 穴の数と総面積比も特徴として追加
+    num_holes = len(holes) if holes else 0
+    outer_area = cv2.contourArea(outer)
+    hole_area_ratio = 0.0
+    if holes and outer_area > 0:
+        total_hole_area = sum(cv2.contourArea(h) for h in holes if len(h) >= 3)
+        hole_area_ratio = total_hole_area / outer_area
+    
+    all_coeffs.append(float(num_holes) / 10.0)  # 正規化（最大10個の穴を想定）
+    all_coeffs.append(hole_area_ratio)
+    
+    return np.array(all_coeffs, dtype=float)
+
+
 def compute_global_embedding(
-    contours: Dict[str, np.ndarray],
+    contours: Dict[str, ContourData],
     num_fourier: int = 16,
     method: str = "MDS",
     random_state: int = 0,
+    use_holes: bool = True,
 ) -> Tuple[pd.DataFrame, List[str]]:
     """Compute feature vectors (Hu + Fourier) for each contour and return 2D embedding DataFrame.
+
+    Parameters:
+        contours: 輪郭データの辞書
+        num_fourier: フーリエ係数数
+        method: 埋め込み手法 ('MDS' or 'TSNE')
+        random_state: 乱数シード
+        use_holes: 穴の情報を使用するか（Trueの場合、穴対応の特徴量計算を使用）
 
     Returns (df, skipped_files)
     df columns: ['x','y','label']
@@ -85,9 +248,10 @@ def compute_global_embedding(
 
     for label, contour in contours.items():
         try:
-            hu = compute_hu_moments(contour)
-            fd = compute_fourier_descriptors(contour, num_fourier)
-            feat = np.concatenate([hu, fd])
+            feat = compute_feature_vector(contour, num_fourier, use_holes=use_holes)
+            if feat is None:
+                skipped.append(label)
+                continue
             features.append(feat)
             labels.append(label)
         except Exception as e:
@@ -194,15 +358,36 @@ def compute_cluster_stats(df: pd.DataFrame) -> pd.DataFrame:
     return stats
 
 
-def compute_feature_vector(contour: np.ndarray, num_fourier: int = 16) -> Optional[np.ndarray]:
+def compute_feature_vector(contour: ContourData, num_fourier: int = 16, use_holes: bool = True) -> Optional[np.ndarray]:
     """単一の輪郭から特徴量ベクトルを計算
     
+    Parameters:
+        contour: 輪郭データ（np.ndarray または (outer, holes, islands) のタプル）
+        num_fourier: フーリエ係数数
+        use_holes: 穴の情報を使用するか
+    
     Returns:
-        特徴量ベクトル (Hu moments + Fourier descriptors)
+        特徴量ベクトル
+        - use_holes=False: Hu moments (7) + Fourier descriptors (num_fourier) = 7 + num_fourier 次元
+        - use_holes=True: Hu moments (7) + Fourier with holes (num_fourier*2 + 2) = 7 + num_fourier*2 + 2 次元
     """
     try:
-        hu = compute_hu_moments(contour)
-        fd = compute_fourier_descriptors(contour, num_fourier)
+        outer = _extract_outer_contour(contour)
+        if outer is None or len(outer) < 3:
+            return None
+        
+        holes = _extract_holes(contour)
+        has_holes = isinstance(contour, tuple) and len(holes) > 0
+        
+        if use_holes and has_holes:
+            # 穴対応版の特徴量計算
+            hu = compute_hu_moments_with_holes(contour)
+            fd = compute_fourier_descriptors_with_holes(contour, num_fourier)
+        else:
+            # 従来版（外側輪郭のみ）
+            hu = compute_hu_moments(contour)
+            fd = compute_fourier_descriptors(contour, num_fourier)
+        
         return np.concatenate([hu, fd])
     except Exception:
         return None
@@ -210,9 +395,10 @@ def compute_feature_vector(contour: np.ndarray, num_fourier: int = 16) -> Option
 
 def find_similar_shapes(
     query_name: str,
-    contours: Dict[str, np.ndarray],
+    contours: Dict[str, ContourData],
     num_fourier: int = 16,
     top_k: int = 5,
+    use_holes: bool = True,
 ) -> List[Tuple[str, float]]:
     """クエリ画像に類似した形状を検索
     
@@ -221,6 +407,7 @@ def find_similar_shapes(
         contours: 全ての輪郭データ {ファイル名: 輪郭点}
         num_fourier: フーリエ係数数
         top_k: 上位何件を返すか
+        use_holes: 穴の情報を使用するか
     
     Returns:
         [(ファイル名, 類似度スコア), ...] のリスト（類似度が高い順）
@@ -232,7 +419,7 @@ def find_similar_shapes(
     # 全ての特徴量を計算
     features = {}
     for name, contour in contours.items():
-        feat = compute_feature_vector(contour, num_fourier)
+        feat = compute_feature_vector(contour, num_fourier, use_holes=use_holes)
         if feat is not None:
             features[name] = feat
     
@@ -274,10 +461,11 @@ def find_similar_shapes(
 
 
 def compute_pairwise_similarity(
-    contours: Dict[str, np.ndarray],
+    contours: Dict[str, ContourData],
     num_fourier: int = 16,
     max_samples: int = 100,
     progress_callback=None,
+    use_holes: bool = True,
 ) -> Tuple[pd.DataFrame, bool]:
     """全ペア間の類似度を計算
     
@@ -286,6 +474,7 @@ def compute_pairwise_similarity(
         num_fourier: フーリエ係数数
         max_samples: ヒートマップ表示用の最大サンプル数（超える場合はサンプリング）
         progress_callback: 進捗コールバック関数
+        use_holes: 穴の情報を使用するか
     
     Returns:
         (類似度行列のDataFrame, サンプリングされたかどうか)
@@ -296,7 +485,7 @@ def compute_pairwise_similarity(
     
     total = len(contours)
     for i, (name, contour) in enumerate(contours.items()):
-        feat = compute_feature_vector(contour, num_fourier)
+        feat = compute_feature_vector(contour, num_fourier, use_holes=use_holes)
         if feat is not None:
             names.append(name)
             feat_list.append(feat)
@@ -347,8 +536,9 @@ def compute_pairwise_similarity(
 
 def compute_similarity_for_query(
     query_name: str,
-    contours: Dict[str, np.ndarray],
+    contours: Dict[str, ContourData],
     num_fourier: int = 16,
+    use_holes: bool = True,
 ) -> pd.DataFrame:
     """特定の画像に対する全画像の類似度を計算（軽量版）
     
@@ -363,7 +553,7 @@ def compute_similarity_for_query(
     feat_list = []
     
     for name, contour in contours.items():
-        feat = compute_feature_vector(contour, num_fourier)
+        feat = compute_feature_vector(contour, num_fourier, use_holes=use_holes)
         if feat is not None:
             names.append(name)
             feat_list.append(feat)
@@ -399,9 +589,10 @@ def compute_similarity_for_query(
 
 
 def export_full_similarity_matrix(
-    contours: Dict[str, np.ndarray],
+    contours: Dict[str, ContourData],
     num_fourier: int = 16,
     output_path: str = None,
+    use_holes: bool = True,
 ) -> bytes:
     """全ペア類似度をCSVとしてエクスポート（大規模データ対応）
     
@@ -415,7 +606,7 @@ def export_full_similarity_matrix(
     feat_list = []
     
     for name, contour in contours.items():
-        feat = compute_feature_vector(contour, num_fourier)
+        feat = compute_feature_vector(contour, num_fourier, use_holes=use_holes)
         if feat is not None:
             names.append(name)
             feat_list.append(feat)
