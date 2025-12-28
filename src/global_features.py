@@ -367,29 +367,42 @@ def compute_feature_vector(contour: ContourData, num_fourier: int = 16, use_hole
         use_holes: 穴の情報を使用するか
     
     Returns:
-        特徴量ベクトル
+        特徴量ベクトル（常に同じ次元数を保証）
         - use_holes=False: Hu moments (7) + Fourier descriptors (num_fourier) = 7 + num_fourier 次元
         - use_holes=True: Hu moments (7) + Fourier with holes (num_fourier*2 + 2) = 7 + num_fourier*2 + 2 次元
+                         ※穴がない画像でも同じ次元で、穴部分は0埋め
     """
     try:
         outer = _extract_outer_contour(contour)
         if outer is None or len(outer) < 3:
             return None
         
-        holes = _extract_holes(contour)
-        has_holes = isinstance(contour, tuple) and len(holes) > 0
-        
-        if use_holes and has_holes:
-            # 穴対応版の特徴量計算
-            hu = compute_hu_moments_with_holes(contour)
-            fd = compute_fourier_descriptors_with_holes(contour, num_fourier)
+        if use_holes:
+            # 常に穴対応版の次元で出力（穴がない場合は穴部分を0で埋める）
+            holes = _extract_holes(contour)
+            has_holes = isinstance(contour, tuple) and len(holes) > 0
+            
+            if has_holes:
+                # 穴対応版の特徴量計算
+                hu = compute_hu_moments_with_holes(contour)
+                fd = compute_fourier_descriptors_with_holes(contour, num_fourier)
+            else:
+                # 穴がない場合も同じ次元で出力
+                hu = compute_hu_moments(contour)
+                # 外側輪郭のフーリエ記述子
+                fd_outer = compute_fourier_descriptors(contour, num_fourier)
+                # 穴部分は0で埋める（num_fourier次元 + 穴の数 + 穴面積比 = num_fourier + 2）
+                fd_holes = np.zeros(num_fourier + 2)
+                fd = np.concatenate([fd_outer, fd_holes])
         else:
             # 従来版（外側輪郭のみ）
             hu = compute_hu_moments(contour)
             fd = compute_fourier_descriptors(contour, num_fourier)
         
         return np.concatenate([hu, fd])
-    except Exception:
+    except Exception as e:
+        import warnings
+        warnings.warn(f"Feature extraction failed: {e}")
         return None
 
 
