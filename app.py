@@ -366,11 +366,50 @@ with tabs[3]:
                         st.warning("類似画像が見つかりませんでした。")
             
             # 類似度マトリックス（オプション）
-            with st.expander("📈 全ペア類似度マトリックス"):
-                from src.global_features import compute_pairwise_similarity
+            st.markdown("---")
+            st.subheader("📈 類似度マトリックス")
+            
+            num_images = len(contours)
+            st.info(f"📊 対象画像数: {num_images}枚")
+            
+            if num_images > 500:
+                st.warning(f"⚠️ 画像数が多いため（{num_images}枚）、ヒートマップ表示は最大100枚のサンプルに制限されます。完全なマトリックスはCSVでダウンロードできます。")
+            
+            col_matrix1, col_matrix2 = st.columns(2)
+            
+            with col_matrix1:
+                show_heatmap = st.checkbox("ヒートマップを表示", value=num_images <= 100)
+            
+            with col_matrix2:
+                max_heatmap_samples = st.slider(
+                    "ヒートマップ最大サンプル数",
+                    min_value=20,
+                    max_value=200,
+                    value=100,
+                    help="ヒートマップに表示する最大画像数。メモリとパフォーマンスのため制限しています。"
+                )
+            
+            from src.global_features import compute_pairwise_similarity, export_full_similarity_matrix
+            
+            # ヒートマップ表示
+            if show_heatmap:
+                with st.spinner(f"類似度を計算中... ({min(num_images, max_heatmap_samples)}枚)"):
+                    progress_bar = st.progress(0)
+                    
+                    def update_progress(p):
+                        progress_bar.progress(min(p, 1.0))
+                    
+                    sim_matrix, was_sampled = compute_pairwise_similarity(
+                        contours, num_fourier, 
+                        max_samples=max_heatmap_samples,
+                        progress_callback=update_progress
+                    )
+                    progress_bar.empty()
                 
-                sim_matrix = compute_pairwise_similarity(contours, num_fourier)
                 if not sim_matrix.empty:
+                    if was_sampled:
+                        st.info(f"🎲 表示用に{max_heatmap_samples}枚をランダムサンプリングしました。")
+                    
                     import plotly.express as px
                     
                     fig = px.imshow(
@@ -384,18 +423,27 @@ with tabs[3]:
                     fig.update_layout(
                         xaxis_title="",
                         yaxis_title="",
-                        xaxis=dict(tickangle=45)
+                        xaxis=dict(tickangle=45),
+                        height=max(400, min(800, len(sim_matrix) * 5))
                     )
                     st.plotly_chart(fig, use_container_width=True)
-                    
-                    # CSVダウンロード
-                    csv = sim_matrix.to_csv()
+            
+            # CSVダウンロード（完全版）
+            st.markdown("### 📥 完全な類似度マトリックスをダウンロード")
+            
+            if st.button("類似度マトリックスを生成（CSV）", key="generate_full_matrix"):
+                with st.spinner(f"全{num_images}枚の類似度を計算中...（大規模データの場合、数分かかることがあります）"):
+                    csv_bytes = export_full_similarity_matrix(contours, num_fourier)
+                
+                if csv_bytes:
                     st.download_button(
-                        "📥 類似度マトリックスをCSVでダウンロード",
-                        csv,
-                        "similarity_matrix.csv",
-                        "text/csv"
+                        "📥 CSVをダウンロード",
+                        csv_bytes,
+                        "similarity_matrix_full.csv",
+                        "text/csv",
+                        key="download_full_matrix"
                     )
+                    st.success(f"✅ {num_images}x{num_images}の類似度マトリックスを生成しました。")
             
             if skipped:
                 st.warning(f"以下のファイルは輪郭抽出に失敗しました: {skipped}")

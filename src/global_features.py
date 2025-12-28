@@ -276,35 +276,61 @@ def find_similar_shapes(
 def compute_pairwise_similarity(
     contours: Dict[str, np.ndarray],
     num_fourier: int = 16,
-) -> pd.DataFrame:
+    max_samples: int = 100,
+    progress_callback=None,
+) -> Tuple[pd.DataFrame, bool]:
     """全ペア間の類似度を計算
     
+    Parameters:
+        contours: 輪郭データの辞書
+        num_fourier: フーリエ係数数
+        max_samples: ヒートマップ表示用の最大サンプル数（超える場合はサンプリング）
+        progress_callback: 進捗コールバック関数
+    
     Returns:
-        類似度行列のDataFrame
+        (類似度行列のDataFrame, サンプリングされたかどうか)
     """
     # 全ての特徴量を計算
-    features = {}
     names = []
     feat_list = []
     
-    for name, contour in contours.items():
+    total = len(contours)
+    for i, (name, contour) in enumerate(contours.items()):
         feat = compute_feature_vector(contour, num_fourier)
         if feat is not None:
-            features[name] = feat
             names.append(name)
             feat_list.append(feat)
+        if progress_callback and i % 100 == 0:
+            progress_callback(i / total * 0.5)  # 前半50%
     
     if len(names) < 2:
-        return pd.DataFrame()
+        return pd.DataFrame(), False
+    
+    # サンプリングが必要かチェック
+    sampled = False
+    if len(names) > max_samples:
+        # ランダムサンプリング
+        np.random.seed(42)
+        indices = np.random.choice(len(names), max_samples, replace=False)
+        indices = sorted(indices)
+        names = [names[i] for i in indices]
+        feat_list = [feat_list[i] for i in indices]
+        sampled = True
     
     # 標準化
     X = np.array(feat_list)
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
     
+    if progress_callback:
+        progress_callback(0.7)
+    
     # ペアワイズ距離を計算
     from scipy.spatial.distance import cdist
     dist_matrix = cdist(X_scaled, X_scaled, metric='euclidean')
+    
+    if progress_callback:
+        progress_callback(0.9)
     
     # 距離を類似度に変換
     max_dist = dist_matrix.max() if dist_matrix.max() > 0 else 1.0
@@ -313,4 +339,120 @@ def compute_pairwise_similarity(
     # DataFrameに変換
     df = pd.DataFrame(sim_matrix, index=names, columns=names)
     
+    if progress_callback:
+        progress_callback(1.0)
+    
+    return df, sampled
+
+
+def compute_similarity_for_query(
+    query_name: str,
+    contours: Dict[str, np.ndarray],
+    num_fourier: int = 16,
+) -> pd.DataFrame:
+    """特定の画像に対する全画像の類似度を計算（軽量版）
+    
+    Returns:
+        query_nameに対する各画像の類似度DataFrame
+    """
+    if query_name not in contours:
+        return pd.DataFrame()
+    
+    # 全ての特徴量を計算
+    names = []
+    feat_list = []
+    
+    for name, contour in contours.items():
+        feat = compute_feature_vector(contour, num_fourier)
+        if feat is not None:
+            names.append(name)
+            feat_list.append(feat)
+    
+    if len(names) < 2 or query_name not in names:
+        return pd.DataFrame()
+    
+    # 標準化
+    X = np.array(feat_list)
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    
+    # クエリのインデックスを取得
+    query_idx = names.index(query_name)
+    query_vec = X_scaled[query_idx].reshape(1, -1)
+    
+    # クエリと全画像の距離を計算
+    from scipy.spatial.distance import cdist
+    distances = cdist(query_vec, X_scaled, metric='euclidean')[0]
+    
+    # 距離を類似度に変換
+    max_dist = distances.max() if distances.max() > 0 else 1.0
+    similarities = 1.0 - (distances / (max_dist + 1e-6))
+    
+    # DataFrameに変換
+    df = pd.DataFrame({
+        "filename": names,
+        "similarity": similarities
+    })
+    df = df.sort_values("similarity", ascending=False)
+    
     return df
+
+
+def export_full_similarity_matrix(
+    contours: Dict[str, np.ndarray],
+    num_fourier: int = 16,
+    output_path: str = None,
+) -> bytes:
+    """全ペア類似度をCSVとしてエクスポート（大規模データ対応）
+    
+    Returns:
+        CSV形式のバイト列
+    """
+    import io
+    
+    # 全ての特徴量を計算
+    names = []
+    feat_list = []
+    
+    for name, contour in contours.items():
+        feat = compute_feature_vector(contour, num_fourier)
+        if feat is not None:
+            names.append(name)
+            feat_list.append(feat)
+    
+    if len(names) < 2:
+        return b""
+    
+    # 標準化
+    X = np.array(feat_list)
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    
+    # チャンク処理で類似度を計算（メモリ効率化）
+    chunk_size = 500
+    
+    # CSVヘッダー
+    buffer = io.StringIO()
+    buffer.write("," + ",".join(names) + "\n")
+    
+    from scipy.spatial.distance import cdist
+    
+    # 全体の最大距離を先に計算（サンプリングで推定）
+    sample_size = min(100, len(X_scaled))
+    sample_indices = np.random.choice(len(X_scaled), sample_size, replace=False)
+    sample_dists = cdist(X_scaled[sample_indices], X_scaled[sample_indices], metric='euclidean')
+    max_dist = sample_dists.max() if sample_dists.max() > 0 else 1.0
+    
+    # チャンクごとに処理
+    for i in range(0, len(X_scaled), chunk_size):
+        chunk = X_scaled[i:i+chunk_size]
+        dist_chunk = cdist(chunk, X_scaled, metric='euclidean')
+        sim_chunk = 1.0 - (dist_chunk / (max_dist + 1e-6))
+        
+        for j, row in enumerate(sim_chunk):
+            row_name = names[i + j]
+            row_str = ",".join([f"{v:.4f}" for v in row])
+            buffer.write(f"{row_name},{row_str}\n")
+    
+    csv_bytes = buffer.getvalue().encode('utf-8')
+    return csv_bytes
