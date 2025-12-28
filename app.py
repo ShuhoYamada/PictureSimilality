@@ -357,13 +357,26 @@ with tabs[3]:
         files_data_tuple = tuple(files_data)
         
         # 輪郭と画像を取得
-        contours, images, skipped = _get_contours_and_images(
-            files_data_tuple, threshold, epsilon_factor, num_points, include_holes, min_hole_area
-        )
+        with st.spinner("画像を処理中..."):
+            contours, images, skipped = _get_contours_and_images(
+                files_data_tuple, threshold, epsilon_factor, num_points, include_holes, min_hole_area
+            )
         
         if len(contours) < 2:
             st.error("有効な輪郭を持つ画像が2枚以上見つかりませんでした。")
         else:
+            # 特徴量を事前計算（キャッシュ）
+            @st.cache_data
+            def _compute_features_cached(contours_keys: tuple, _contours: dict, _num_fourier: int):
+                """特徴量を計算してキャッシュ"""
+                from src.global_features import compute_all_features
+                return compute_all_features(_contours, _num_fourier, use_holes=True)
+            
+            # 特徴量を計算
+            contours_keys = tuple(sorted(contours.keys()))
+            with st.spinner(f"特徴量を計算中... ({len(contours)}枚)"):
+                precomputed_features = _compute_features_cached(contours_keys, contours, num_fourier)
+            
             # 検索対象の画像を選択
             available_images = list(contours.keys())
             
@@ -387,8 +400,11 @@ with tabs[3]:
                 if query_image:
                     from src.global_features import find_similar_shapes
                     
-                    # 類似画像を検索
-                    similar = find_similar_shapes(query_image, contours, num_fourier, top_k)
+                    # 類似画像を検索（事前計算済み特徴量を使用）
+                    similar = find_similar_shapes(
+                        query_image, contours, num_fourier, top_k,
+                        precomputed_features=precomputed_features
+                    )
                     
                     if similar:
                         st.subheader(f"📊 類似画像 TOP {len(similar)}")

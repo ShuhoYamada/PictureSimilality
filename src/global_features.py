@@ -412,12 +412,47 @@ def compute_feature_vector(contour: ContourData, num_fourier: int = 16, use_hole
         return None
 
 
+def compute_all_features(
+    contours: Dict[str, ContourData],
+    num_fourier: int = 16,
+    use_holes: bool = True,
+    progress_callback=None,
+) -> Dict[str, np.ndarray]:
+    """全ての輪郭の特徴量を一括計算（キャッシュ用）
+    
+    Parameters:
+        contours: 輪郭データの辞書
+        num_fourier: フーリエ係数数
+        use_holes: 穴の情報を使用するか
+        progress_callback: 進捗コールバック関数
+    
+    Returns:
+        {ファイル名: 特徴量ベクトル} の辞書
+    """
+    features = {}
+    total = len(contours)
+    
+    for i, (name, contour) in enumerate(contours.items()):
+        try:
+            feat = compute_feature_vector(contour, num_fourier, use_holes=use_holes)
+            if feat is not None:
+                features[name] = feat
+        except Exception:
+            pass
+        
+        if progress_callback and (i + 1) % 100 == 0:
+            progress_callback(i + 1, total)
+    
+    return features
+
+
 def find_similar_shapes(
     query_name: str,
     contours: Dict[str, ContourData],
     num_fourier: int = 16,
     top_k: int = 5,
     use_holes: bool = True,
+    precomputed_features: Dict[str, np.ndarray] = None,
 ) -> List[Tuple[str, float]]:
     """クエリ画像に類似した形状を検索
     
@@ -427,6 +462,7 @@ def find_similar_shapes(
         num_fourier: フーリエ係数数
         top_k: 上位何件を返すか
         use_holes: 穴の情報を使用するか
+        precomputed_features: 事前計算済み特徴量（オプション、パフォーマンス向上用）
     
     Returns:
         [(ファイル名, 類似度スコア), ...] のリスト（類似度が高い順）
@@ -435,12 +471,16 @@ def find_similar_shapes(
     if query_name not in contours:
         return []
     
-    # 全ての特徴量を計算
-    features = {}
-    for name, contour in contours.items():
-        feat = compute_feature_vector(contour, num_fourier, use_holes=use_holes)
-        if feat is not None:
-            features[name] = feat
+    # 事前計算済み特徴量を使用するか、新たに計算
+    if precomputed_features is not None:
+        features = precomputed_features
+    else:
+        # 全ての特徴量を計算
+        features = {}
+        for name, contour in contours.items():
+            feat = compute_feature_vector(contour, num_fourier, use_holes=use_holes)
+            if feat is not None:
+                features[name] = feat
     
     if query_name not in features:
         return []
