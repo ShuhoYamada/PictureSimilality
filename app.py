@@ -163,8 +163,8 @@ def _process_multiple(files_data: tuple, threshold: int, epsilon: float, num_poi
     if len(contours) < 2:
         return None, skipped
 
-    df, skipped_more = compute_global_embedding(contours, num_fourier=num_fourier, method=method)
-    skipped += skipped_more
+    df, skipped = compute_global_embedding(contours, num_fourier=num_fourier, method=method)
+    skipped += skipped
     return df, skipped
 
 
@@ -228,7 +228,7 @@ with tabs[0]:
         # 解析ボタン
         col_btn1, col_btn2 = st.columns([1, 3])
         with col_btn1:
-            analyze_global = st.button("🔬 解析開始", type="primary", use_container_width=True, key="global_analyze")
+            analyze_global = st.button("🔬 解析開始", type="primary", width='stretch', key="global_analyze")
         with col_btn2:
             if st.session_state.global_map_analyzed and st.session_state.global_map_df is not None:
                 st.success(f"✅ 解析済み: {len(st.session_state.global_map_df)}枚")
@@ -292,8 +292,8 @@ with tabs[0]:
                 progress_bar.progress(0.5, text="埋め込みを計算中...")
                 from src.global_features import compute_global_embedding
                 
-                df, skipped_more = compute_global_embedding(contours, num_fourier=num_fourier, method=method)
-                skipped.extend(skipped_more)
+                df, skipped = compute_global_embedding(contours, num_fourier=num_fourier, method=method)
+                skipped.extend(skipped)
                 
                 # クラスタリングを適用
                 if enable_clustering and cluster_params is not None:
@@ -319,7 +319,7 @@ with tabs[0]:
             
             from src.visualizer import plot_global_map
             fig = plot_global_map(df, show_clusters=enable_clustering)
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width='stretch')
             
             # クラスタリング結果を表示
             if enable_clustering and "cluster" in df.columns:
@@ -361,20 +361,42 @@ with tabs[1]:
     
     if single is None:
         st.info("ここでは1枚の画像を選んで輪郭を確認できます。")
+        # 画像がクリアされたらセッション状態もリセット
+        if 'single_analyzed' in st.session_state:
+            st.session_state.single_analyzed = False
+            st.session_state.single_result = None
+            st.session_state.single_last_filename = None
     else:
         # セッション状態の初期化
         if 'single_analyzed' not in st.session_state:
             st.session_state.single_analyzed = False
         if 'single_result' not in st.session_state:
             st.session_state.single_result = None
+        if 'single_last_filename' not in st.session_state:
+            st.session_state.single_last_filename = None
         
-        # 解析ボタン
-        col_btn1, col_btn2 = st.columns([1, 3])
+        # 新しい画像がアップロードされたかチェック
+        if st.session_state.single_last_filename != single.name:
+            # 新しい画像なので前の結果をクリア
+            st.session_state.single_analyzed = False
+            st.session_state.single_result = None
+            st.session_state.single_last_filename = single.name
+        
+        # 解析ボタンとリセットボタン
+        col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 2])
         with col_btn1:
-            analyze_single = st.button("🔬 解析開始", type="primary", use_container_width=True, key="single_analyze")
+            analyze_single = st.button("🔬 解析開始", type="primary", width='stretch', key="single_analyze")
         with col_btn2:
+            reset_single = st.button("🔄 リセット", type="secondary", width='stretch', key="single_reset")
+        with col_btn3:
             if st.session_state.single_analyzed:
-                st.success("✅ 解析済み")
+                st.success(f"✅ 解析済み: {st.session_state.single_last_filename}")
+        
+        # リセットボタンが押されたら結果をクリア
+        if reset_single:
+            st.session_state.single_analyzed = False
+            st.session_state.single_result = None
+            st.rerun()
         
         if analyze_single:
             try:
@@ -389,32 +411,42 @@ with tabs[1]:
                     'name': single.name
                 }
                 st.session_state.single_analyzed = True
+                st.session_state.single_last_filename = single.name
                 st.rerun()
             except Exception as e:
-                st.exception(e)
+                st.error(f"画像処理中にエラーが発生しました: {str(e)}")
+                with st.expander("詳細なエラー情報"):
+                    st.exception(e)
         
-        # 解析済みの場合、結果を表示
+        # 解析済みの場合、結果を表示（現在の画像と一致する場合のみ）
         if st.session_state.single_analyzed and st.session_state.single_result:
             result = st.session_state.single_result
             
-            st.markdown("---")
-            
-            # 元画像と処理後画像を並べて表示
-            st.subheader("画像比較")
-            img_col1, img_col2 = st.columns(2)
-            with img_col1:
-                st.image(result['original'], caption="元画像 (Original)", use_container_width=True)
-            with img_col2:
-                st.image(result['binary'], caption="二値化画像 (Binarized)", use_container_width=True)
-            
-            st.markdown("---")
-            
-            if result['contour'] is None:
-                st.error("輪郭が検出できませんでした。閾値設定や画像を確認してください。")
+            # 現在アップロードされている画像と結果が一致するか確認
+            if result['name'] == single.name:
+                st.markdown("---")
+                
+                # 元画像と処理後画像を並べて表示
+                st.subheader("画像比較")
+                img_col1, img_col2 = st.columns(2)
+                with img_col1:
+                    st.image(result['original'], caption="元画像 (Original)", width='stretch')
+                with img_col2:
+                    st.image(result['binary'], caption="二値化画像 (Binarized)", width='stretch')
+                
+                st.markdown("---")
+                
+                if result['contour'] is None:
+                    st.error("輪郭が検出できませんでした。閾値設定や画像を確認してください。")
+                else:
+                    st.subheader("抽出された輪郭")
+                    fig = plot_contour(result['contour'], title=result['name'])
+                    st.plotly_chart(fig, width='stretch')
             else:
-                st.subheader("抽出された輪郭")
-                fig = plot_contour(result['contour'], title=result['name'])
-                st.plotly_chart(fig, use_container_width=True)
+                # 画像が変わったが自動リセットが効いていない場合
+                st.session_state.single_analyzed = False
+                st.session_state.single_result = None
+                st.rerun()
 
 # --- Local Comparison Tab
 with tabs[2]:
@@ -447,17 +479,17 @@ with tabs[2]:
                 st.write(f"**基準画像: {ref.name}**")
                 ref_col1, ref_col2 = st.columns(2)
                 with ref_col1:
-                    st.image(ref_orig, caption="元画像 (Original)", use_container_width=True)
+                    st.image(ref_orig, caption="元画像 (Original)", width='stretch')
                 with ref_col2:
-                    st.image(ref_bin, caption="二値化画像 (Binarized)", use_container_width=True)
+                    st.image(ref_bin, caption="二値化画像 (Binarized)", width='stretch')
                 
                 # 比較画像: 元画像と二値化画像
                 st.write(f"**比較画像: {tgt.name}**")
                 tgt_col1, tgt_col2 = st.columns(2)
                 with tgt_col1:
-                    st.image(tgt_orig, caption="元画像 (Original)", use_container_width=True)
+                    st.image(tgt_orig, caption="元画像 (Original)", width='stretch')
                 with tgt_col2:
-                    st.image(tgt_bin, caption="二値化画像 (Binarized)", use_container_width=True)
+                    st.image(tgt_bin, caption="二値化画像 (Binarized)", width='stretch')
                 
                 st.markdown("---")
 
@@ -474,7 +506,7 @@ with tabs[2]:
 
                     st.subheader("輪郭の位置合わせ結果")
                     fig = plot_local_comparison(ref_contour, aligned_tgt, target_to_source, title=f"{ref.name} ↔ {tgt.name}")
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, width='stretch')
 
                     st.markdown("---")
                     metric_col1, metric_col2 = st.columns(2)
@@ -516,7 +548,7 @@ with tabs[3]:
         # 解析ボタン
         col_btn1, col_btn2 = st.columns([1, 3])
         with col_btn1:
-            analyze_button = st.button("🔬 解析開始", type="primary", use_container_width=True)
+            analyze_button = st.button("🔬 解析開始", type="primary", width='stretch')
         with col_btn2:
             if st.session_state.similarity_analyzed:
                 st.success(f"✅ 解析済み: {len(st.session_state.similarity_contours)}枚")
@@ -654,7 +686,7 @@ with tabs[3]:
                 
                 # 選択した画像を表示
                 if query_image and query_image in images:
-                    st.image(images[query_image], caption=f"選択中: {query_image}", use_container_width=True)
+                    st.image(images[query_image], caption=f"選択中: {query_image}", width='stretch')
             
             with col2:
                 if query_image:
@@ -679,7 +711,7 @@ with tabs[3]:
                                     name, score = similar[idx]
                                     with col:
                                         if name in images:
-                                            st.image(images[name], use_container_width=True)
+                                            st.image(images[name], width='stretch')
                                         st.markdown(f"**{idx + 1}. {name}**")
                                         st.progress(score, text=f"類似度: {score:.1%}")
                     else:
@@ -746,7 +778,7 @@ with tabs[3]:
                         xaxis=dict(tickangle=45),
                         height=max(400, min(800, len(sim_matrix) * 5))
                     )
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, width='stretch')
             
             # CSVダウンロード（完全版）
             st.markdown("### 📥 完全な類似度マトリックスをダウンロード")
@@ -765,5 +797,6 @@ with tabs[3]:
                     )
                     st.success(f"✅ {num_images}x{num_images}の類似度マトリックスを生成しました。")
             
+            skipped = st.session_state.get('similarity_skipped', [])
             if skipped:
                 st.warning(f"以下のファイルは輪郭抽出に失敗しました: {skipped}")
