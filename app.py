@@ -60,9 +60,9 @@ else:
 has_images = (uploaded_files and len(uploaded_files) > 0) or len(folder_files) > 0
 image_count = len(uploaded_files) if uploaded_files else len(folder_files)
 
-threshold = st.sidebar.slider("閾値 (0=Otsu)", 0, 255, 0)
-epsilon_factor = st.sidebar.slider("approx epsilon factor", 0.001, 0.05, 0.01)
-num_points = st.sidebar.slider("リサンプリング点数", 50, 1000, 200)
+threshold = st.sidebar.slider("閾値 (0=Otsu)", 0, 255, 100)
+epsilon_factor = st.sidebar.slider("approx epsilon factor", 0.001, 0.05, 0.003)
+num_points = st.sidebar.slider("リサンプリング点数", 50, 1000, 400)
 include_holes = st.sidebar.checkbox("穴（内側輪郭）を含める", value=True)
 min_hole_area = st.sidebar.slider("穴の最小面積 (px²)", 10, 1000, 100) if include_holes else 100
 num_fourier = st.sidebar.slider("フーリエ係数数 (num_coeffs)", 4, 128, 16)
