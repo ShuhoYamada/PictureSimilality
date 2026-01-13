@@ -442,6 +442,53 @@ with tabs[1]:
                     st.subheader("抽出された輪郭")
                     fig = plot_contour(result['contour'], title=result['name'])
                     st.plotly_chart(fig, width='stretch')
+                    
+                    # 形状ベクトルの計算と表示
+                    st.markdown("---")
+                    st.subheader("形状ベクトル（特徴量）")
+                    
+                    from src.global_features import compute_feature_vector_with_details
+                    
+                    result_details = compute_feature_vector_with_details(
+                        result['contour'], 
+                        num_fourier=num_fourier, 
+                        use_holes=include_holes
+                    )
+                    
+                    if result_details is not None:
+                        feature_vector, details = result_details
+                        
+                        # ベクトルの概要を表示
+                        st.write(f"**ベクトル次元数:** {len(feature_vector)}")
+                        
+                        # カテゴリ別に整理して表示
+                        import pandas as pd
+                        
+                        # DataFrameに変換
+                        df_features = pd.DataFrame(details)
+                        
+                        # カテゴリごとにグループ化して表示
+                        categories = df_features['category'].unique()
+                        
+                        for cat in categories:
+                            cat_data = df_features[df_features['category'] == cat]
+                            
+                            with st.expander(f"📊 {cat} ({len(cat_data)}成分)", expanded=(cat == "Huモーメント")):
+                                # テーブル形式で表示
+                                display_df = cat_data[['name', 'value', 'description']].copy()
+                                display_df.columns = ['成分名', '値', '説明']
+                                display_df['値'] = display_df['値'].apply(lambda x: f"{x:.6f}")
+                                st.dataframe(display_df, hide_index=True, use_container_width=True)
+                        
+                        # 全ベクトルの生データを表示するオプション
+                        with st.expander("📋 生ベクトルデータ（コピー用）"):
+                            st.code(f"# 形状ベクトル ({len(feature_vector)}次元)\n{feature_vector.tolist()}", language="python")
+                            
+                            # CSV形式でも表示
+                            csv_data = ",".join([f"{v:.6f}" for v in feature_vector])
+                            st.code(f"# CSV形式\n{csv_data}", language="text")
+                    else:
+                        st.error("特徴量の計算に失敗しました。")
             else:
                 # 画像が変わったが自動リセットが効いていない場合
                 st.session_state.single_analyzed = False

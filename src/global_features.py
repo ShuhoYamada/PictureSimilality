@@ -412,6 +412,119 @@ def compute_feature_vector(contour: ContourData, num_fourier: int = 16, use_hole
         return None
 
 
+def get_feature_vector_labels(num_fourier: int = 16, use_holes: bool = True) -> List[Dict[str, str]]:
+    """特徴量ベクトルの各成分のラベルと説明を返す
+    
+    Parameters:
+        num_fourier: フーリエ係数数
+        use_holes: 穴の情報を使用するか
+    
+    Returns:
+        各成分のラベル情報のリスト
+        [{"index": 0, "name": "Hu1", "category": "Huモーメント", "description": "..."}, ...]
+    """
+    labels = []
+    idx = 0
+    
+    # Huモーメント (7成分)
+    hu_descriptions = [
+        "全体的な重さ・大きさに関する不変量",
+        "形状の扁平度・細長さを表現",
+        "対称性に関する特徴（3次モーメント）",
+        "対称性に関する特徴（4次モーメント）",
+        "回転不変の高次特徴（5次）",
+        "回転不変の高次特徴（6次）",
+        "鏡像識別（正負で鏡像を区別）"
+    ]
+    for i in range(7):
+        labels.append({
+            "index": idx,
+            "name": f"Hu{i+1}",
+            "category": "Huモーメント",
+            "description": hu_descriptions[i]
+        })
+        idx += 1
+    
+    if use_holes:
+        # 穴対応版のフーリエ記述子
+        # 外側輪郭のフーリエ記述子
+        for i in range(num_fourier):
+            labels.append({
+                "index": idx,
+                "name": f"FD_outer_{i+1}",
+                "category": "フーリエ記述子（外側輪郭）",
+                "description": f"外側輪郭の周波数成分 {i+1}（低周波ほど全体形状、高周波ほど細部）"
+            })
+            idx += 1
+        
+        # 穴のフーリエ記述子
+        for i in range(num_fourier):
+            labels.append({
+                "index": idx,
+                "name": f"FD_holes_{i+1}",
+                "category": "フーリエ記述子（穴の合計）",
+                "description": f"穴の周波数成分 {i+1} の合計"
+            })
+            idx += 1
+        
+        # 穴の追加情報
+        labels.append({
+            "index": idx,
+            "name": "num_holes_norm",
+            "category": "穴の情報",
+            "description": "穴の数（10で正規化）"
+        })
+        idx += 1
+        
+        labels.append({
+            "index": idx,
+            "name": "hole_area_ratio",
+            "category": "穴の情報",
+            "description": "穴の総面積 / 外側輪郭の面積"
+        })
+        idx += 1
+    else:
+        # 従来版のフーリエ記述子
+        for i in range(num_fourier):
+            labels.append({
+                "index": idx,
+                "name": f"FD_{i+1}",
+                "category": "フーリエ記述子",
+                "description": f"周波数成分 {i+1}（低周波ほど全体形状、高周波ほど細部）"
+            })
+            idx += 1
+    
+    return labels
+
+
+def compute_feature_vector_with_details(
+    contour: ContourData, 
+    num_fourier: int = 16, 
+    use_holes: bool = True
+) -> Optional[Tuple[np.ndarray, List[Dict]]]:
+    """特徴量ベクトルを計算し、各成分の詳細情報も返す
+    
+    Returns:
+        (feature_vector, details) のタプル
+        details: [{"index": 0, "name": "Hu1", "category": "Huモーメント", "value": 1.23, "description": "..."}, ...]
+    """
+    feature = compute_feature_vector(contour, num_fourier, use_holes)
+    if feature is None:
+        return None
+    
+    labels = get_feature_vector_labels(num_fourier, use_holes)
+    details = []
+    
+    for i, label_info in enumerate(labels):
+        if i < len(feature):
+            details.append({
+                **label_info,
+                "value": float(feature[i])
+            })
+    
+    return feature, details
+
+
 def compute_all_features(
     contours: Dict[str, ContourData],
     num_fourier: int = 16,
